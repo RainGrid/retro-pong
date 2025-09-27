@@ -25,6 +25,10 @@ interface GameState {
   botScore: number;
   gameRunning: boolean;
   gameStarted: boolean;
+  currentBallSpeed: number;
+  currentBotSpeed: number;
+  botReactionTime: number;
+  roundStartTime: number;
 }
 
 const GAME_WIDTH = 300;
@@ -33,7 +37,19 @@ const PADDLE_WIDTH = 80;
 const PADDLE_HEIGHT = 15;
 const BALL_RADIUS = 8;
 const PADDLE_SPEED = 4;
-const BALL_SPEED = 3;
+
+// Dynamic difficulty constants
+const BASE_BALL_SPEED = 3;
+const MAX_BALL_SPEED = 8;
+const BASE_BOT_SPEED = 1.5; // Slower initial bot speed
+const MAX_BOT_SPEED = 6;
+const BASE_BOT_REACTION = 50; // Much dumber bot at start
+const MIN_BOT_REACTION = 8; // Still challenging at max level
+
+// Round speed increase constants
+const ROUND_SPEED_INCREASE_TIME = 10000; // 10 seconds
+const ROUND_SPEED_INCREASE_AMOUNT = 0.3; // Speed increase per interval
+const MAX_ROUND_SPEED_MULTIPLIER = 2.0; // Maximum 2x speed in round
 
 export const PongGame: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -42,8 +58,8 @@ export const PongGame: React.FC = () => {
     ball: {
       x: GAME_WIDTH / 2,
       y: GAME_HEIGHT / 2,
-      dx: BALL_SPEED,
-      dy: BALL_SPEED,
+      dx: BASE_BALL_SPEED,
+      dy: BASE_BALL_SPEED,
       radius: BALL_RADIUS,
     },
     playerPaddle: {
@@ -58,25 +74,70 @@ export const PongGame: React.FC = () => {
       y: 20,
       width: PADDLE_WIDTH,
       height: PADDLE_HEIGHT,
-      speed: PADDLE_SPEED,
+      speed: BASE_BOT_SPEED,
     },
     playerScore: 0,
     botScore: 0,
     gameRunning: false,
     gameStarted: false,
+    currentBallSpeed: BASE_BALL_SPEED,
+    currentBotSpeed: BASE_BOT_SPEED,
+    botReactionTime: BASE_BOT_REACTION,
+    roundStartTime: Date.now(),
   });
 
   const [sliderValue, setSliderValue] = useState(50);
 
+  // Calculate dynamic difficulty based on scores
+  const calculateDifficulty = useCallback((playerScore: number, botScore: number) => {
+    const totalScore = playerScore + botScore;
+    
+    // Ball speed increases more gradually with total score
+    const ballSpeedMultiplier = Math.min(1 + (totalScore * 0.08), MAX_BALL_SPEED / BASE_BALL_SPEED);
+    const newBallSpeed = Math.min(BASE_BALL_SPEED * ballSpeedMultiplier, MAX_BALL_SPEED);
+    
+    // Bot speed increases more gradually
+    const botSpeedMultiplier = Math.min(1 + (totalScore * 0.12), MAX_BOT_SPEED / BASE_BOT_SPEED);
+    const newBotSpeed = Math.min(BASE_BOT_SPEED * botSpeedMultiplier, MAX_BOT_SPEED);
+    
+    // Bot becomes smarter much more gradually - starts very dumb
+    // Takes about 10-15 player points to reach challenging level
+    const reactionMultiplier = Math.max(1 - (playerScore * 0.06), MIN_BOT_REACTION / BASE_BOT_REACTION);
+    const newBotReaction = Math.max(BASE_BOT_REACTION * reactionMultiplier, MIN_BOT_REACTION);
+    
+    return {
+      ballSpeed: newBallSpeed,
+      botSpeed: newBotSpeed,
+      botReaction: newBotReaction,
+    };
+  }, []);
+
+  // Calculate round speed multiplier based on round duration
+  const calculateRoundSpeedMultiplier = useCallback((roundStartTime: number) => {
+    const currentTime = Date.now();
+    const roundDuration = currentTime - roundStartTime;
+    
+    // Calculate how many speed increase intervals have passed
+    const intervalsPassed = Math.floor(roundDuration / ROUND_SPEED_INCREASE_TIME);
+    
+    // Calculate speed multiplier (1.0 = no increase, 2.0 = double speed)
+    const speedMultiplier = 1.0 + (intervalsPassed * ROUND_SPEED_INCREASE_AMOUNT);
+    
+    // Cap at maximum multiplier
+    return Math.min(speedMultiplier, MAX_ROUND_SPEED_MULTIPLIER);
+  }, []);
+
+
   // Initialize game
   const initGame = useCallback(() => {
+    const difficulty = calculateDifficulty(0, 0);
     setGameState((prev) => ({
       ...prev,
       ball: {
         x: GAME_WIDTH / 2,
         y: GAME_HEIGHT / 2,
-        dx: BALL_SPEED * (Math.random() > 0.5 ? 1 : -1),
-        dy: BALL_SPEED * (Math.random() > 0.5 ? 1 : -1),
+        dx: difficulty.ballSpeed * (Math.random() > 0.5 ? 1 : -1),
+        dy: difficulty.ballSpeed * (Math.random() > 0.5 ? 1 : -1),
         radius: BALL_RADIUS,
       },
       playerPaddle: {
@@ -91,14 +152,18 @@ export const PongGame: React.FC = () => {
         y: 20,
         width: PADDLE_WIDTH,
         height: PADDLE_HEIGHT,
-        speed: PADDLE_SPEED,
+        speed: difficulty.botSpeed,
       },
       playerScore: 0,
       botScore: 0,
       gameRunning: true,
       gameStarted: true,
+      currentBallSpeed: difficulty.ballSpeed,
+      currentBotSpeed: difficulty.botSpeed,
+      botReactionTime: difficulty.botReaction,
+      roundStartTime: Date.now(),
     }));
-  }, []);
+  }, [calculateDifficulty]);
 
   // Update player paddle position based on slider
   useEffect(() => {
@@ -114,14 +179,19 @@ export const PongGame: React.FC = () => {
     }
   }, [sliderValue, gameState.gameRunning]);
 
-  // Bot AI
-  const updateBotPaddle = useCallback((ball: Ball, botPaddle: Paddle) => {
+  // Bot AI with dynamic difficulty and randomness
+  const updateBotPaddle = useCallback((ball: Ball, botPaddle: Paddle, reactionTime: number) => {
     const paddleCenter = botPaddle.x + botPaddle.width / 2;
     const ballCenter = ball.x;
 
-    if (ballCenter < paddleCenter - 10) {
+    // Add some randomness to make bot less predictable (more at higher reaction times)
+    const randomFactor = Math.random() * (reactionTime * 0.1);
+    const adjustedReactionTime = reactionTime + randomFactor;
+
+    // Use dynamic reaction time - higher value = dumber bot
+    if (ballCenter < paddleCenter - adjustedReactionTime) {
       return Math.max(0, botPaddle.x - botPaddle.speed);
-    } else if (ballCenter > paddleCenter + 10) {
+    } else if (ballCenter > paddleCenter + adjustedReactionTime) {
       return Math.min(
         GAME_WIDTH - botPaddle.width,
         botPaddle.x + botPaddle.speed,
@@ -135,11 +205,32 @@ export const PongGame: React.FC = () => {
     setGameState((prev) => {
       if (!prev.gameRunning) return prev;
 
+      // Calculate current difficulty
+      const difficulty = calculateDifficulty(prev.playerScore, prev.botScore);
+      
+      // Calculate round speed multiplier
+      const roundSpeedMultiplier = calculateRoundSpeedMultiplier(prev.roundStartTime);
+      
       let newBall = { ...prev.ball };
       let newBotPaddle = { ...prev.botPaddle };
       let newPlayerPaddle = { ...prev.playerPaddle };
       let newPlayerScore = prev.playerScore;
       let newBotScore = prev.botScore;
+      
+      // Apply round speed multiplier to ball speed
+      const baseBallSpeed = difficulty.ballSpeed;
+      const currentBallSpeed = baseBallSpeed * roundSpeedMultiplier;
+      
+      // Update ball speed based on round duration
+      const currentSpeed = Math.sqrt(newBall.dx * newBall.dx + newBall.dy * newBall.dy);
+      if (currentSpeed > 0) {
+        const speedRatio = currentBallSpeed / currentSpeed;
+        newBall.dx *= speedRatio;
+        newBall.dy *= speedRatio;
+      }
+      
+      // Update bot speed
+      newBotPaddle.speed = difficulty.botSpeed;
 
       // Update ball position
       newBall.x += newBall.dx;
@@ -172,7 +263,10 @@ export const PongGame: React.FC = () => {
         const hitPos =
           (newBall.x - (newPlayerPaddle.x + newPlayerPaddle.width / 2)) /
           (newPlayerPaddle.width / 2);
-        newBall.dx = hitPos * BALL_SPEED;
+        // Preserve ball speed, only change direction
+        const currentSpeed = Math.sqrt(newBall.dx * newBall.dx + newBall.dy * newBall.dy);
+        newBall.dx = hitPos * currentSpeed * 0.5;
+        newBall.dy = -Math.sqrt(currentSpeed * currentSpeed - newBall.dx * newBall.dx);
       }
 
       // Bot paddle collision (top paddle)
@@ -188,7 +282,10 @@ export const PongGame: React.FC = () => {
         const hitPos =
           (newBall.x - (newBotPaddle.x + newBotPaddle.width / 2)) /
           (newBotPaddle.width / 2);
-        newBall.dx = hitPos * BALL_SPEED;
+        // Preserve ball speed, only change direction
+        const currentSpeed = Math.sqrt(newBall.dx * newBall.dx + newBall.dy * newBall.dy);
+        newBall.dx = hitPos * currentSpeed * 0.5;
+        newBall.dy = Math.sqrt(currentSpeed * currentSpeed - newBall.dx * newBall.dx);
       }
 
       // Score points
@@ -197,8 +294,8 @@ export const PongGame: React.FC = () => {
         newBall = {
           x: GAME_WIDTH / 2,
           y: GAME_HEIGHT / 2,
-          dx: BALL_SPEED * (Math.random() > 0.5 ? 1 : -1),
-          dy: BALL_SPEED,
+          dx: currentBallSpeed * (Math.random() > 0.5 ? 1 : -1),
+          dy: currentBallSpeed,
           radius: BALL_RADIUS,
         };
         // Reset paddles to center positions
@@ -206,13 +303,15 @@ export const PongGame: React.FC = () => {
         newBotPaddle.y = 20;
         newPlayerPaddle.x = GAME_WIDTH / 2 - PADDLE_WIDTH / 2;
         newPlayerPaddle.y = GAME_HEIGHT - 30;
+        // Reset round timer
+        prev.roundStartTime = Date.now();
       } else if (newBall.y > GAME_HEIGHT) {
         newBotScore++;
         newBall = {
           x: GAME_WIDTH / 2,
           y: GAME_HEIGHT / 2,
-          dx: BALL_SPEED * (Math.random() > 0.5 ? 1 : -1),
-          dy: -BALL_SPEED,
+          dx: currentBallSpeed * (Math.random() > 0.5 ? 1 : -1),
+          dy: -currentBallSpeed,
           radius: BALL_RADIUS,
         };
         // Reset paddles to center positions
@@ -220,10 +319,12 @@ export const PongGame: React.FC = () => {
         newBotPaddle.y = 20;
         newPlayerPaddle.x = GAME_WIDTH / 2 - PADDLE_WIDTH / 2;
         newPlayerPaddle.y = GAME_HEIGHT - 30;
+        // Reset round timer
+        prev.roundStartTime = Date.now();
       }
 
-      // Update bot paddle
-      newBotPaddle.x = updateBotPaddle(newBall, newBotPaddle);
+      // Update bot paddle with dynamic reaction time
+      newBotPaddle.x = updateBotPaddle(newBall, newBotPaddle, difficulty.botReaction);
 
       return {
         ...prev,
@@ -232,11 +333,15 @@ export const PongGame: React.FC = () => {
         botPaddle: newBotPaddle,
         playerScore: newPlayerScore,
         botScore: newBotScore,
+        currentBallSpeed: currentBallSpeed,
+        currentBotSpeed: difficulty.botSpeed,
+        botReactionTime: difficulty.botReaction,
+        roundStartTime: prev.roundStartTime,
       };
     });
 
     animationRef.current = requestAnimationFrame(gameLoop);
-  }, [updateBotPaddle]);
+  }, [updateBotPaddle, calculateDifficulty, calculateRoundSpeedMultiplier]);
 
   // Start game loop when game is running
   useEffect(() => {
